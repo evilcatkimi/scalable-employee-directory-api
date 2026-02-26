@@ -1,8 +1,8 @@
 # HR Employee Search Microservice
 
-Microservice tìm kiếm nhân viên trong organization. Chỉ triển khai **Search API**, không có CRUD, import/export.
+This microservice provides employee search within an organization. It implements only the **Search API** — there is no CRUD or import/export functionality.
 
-## Cách chạy app
+## How to run the app
 
 ### Local (virtual environment)
 
@@ -13,9 +13,10 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-Truy cập:
+Access:
+
 - API: http://localhost:8000
-- OpenAPI: http://localhost:8000/docs
+- OpenAPI (Swagger UI): http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
 ### Docker
@@ -24,13 +25,13 @@ Truy cập:
 # Build image
 docker build -t hr-employee-search .
 
-# Chạy container
+# Run container
 docker run -p 8000:8000 hr-employee-search
 ```
 
-API: http://localhost:8000/docs
+Open the API docs at: http://localhost:8000/docs
 
-### Docker Compose (tùy chọn)
+### Docker Compose (optional)
 
 ```yaml
 services:
@@ -40,7 +41,7 @@ services:
       - "8000:8000"
 ```
 
-## Cách chạy test
+## How to run tests
 
 ```bash
 source .venv/bin/activate
@@ -56,21 +57,23 @@ pytest tests/ -v
 GET /api/v1/employees/search
 ```
 
-**Query params:**
+Query parameters:
+
 - `org_id` (required): Organization ID
 - `name` (optional): Partial match, case-insensitive
 - `department`, `location`, `position` (optional): Exact match
 - `limit` (default 20, max 100): Page size
 - `offset` (default 0): Pagination offset
 
-**Ví dụ:**
+Example:
+
 ```
 GET /api/v1/employees/search?org_id=org_a&name=john&limit=10
 ```
 
-**Response:** JSON với `items`, `total`, `limit`, `offset`. Các field trong mỗi item phụ thuộc cấu hình organization.
+Response: JSON containing `items`, `total`, `limit`, and `offset`. The fields included in each item depend on the organization's column configuration.
 
-## Kiến trúc tổng thể
+## Architecture Overview
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
@@ -87,49 +90,52 @@ GET /api/v1/employees/search?org_id=org_a&name=john&limit=10
                                              └─────────────────┘
 ```
 
-- **API layer**: FastAPI routes, rate limit dependency
-- **Service layer**: `EmployeeSearchService` – orchestrate search, apply column projection
-- **Config**: `column_config` – org → danh sách cột, thứ tự
-- **Storage**: `InMemoryEmployeeStore` – interface giống DB, dễ thay bằng PostgreSQL sau
+- API layer: FastAPI routes and the rate limit dependency
+- Service layer: `EmployeeSearchService` — orchestrates searching and applies column projection
+- Config: `column_config` — maps `org_id` to a list of columns and their order
+- Storage: `InMemoryEmployeeStore` — an in-memory store with an interface that can be replaced by PostgreSQL later
 
-## Thiết kế Rate Limiting
+## Rate Limiting Design
 
-- **Algorithm**: Sliding window (deque timestamps)
-- **Chuẩn library**: Chỉ dùng `threading`, `time`, `collections.deque`
-- **Key**: `org:{org_id}` hoặc `ip:{ip}` khi không có org_id
-- **Limit**: 100 requests / phút / key
-- **Response**: HTTP 429, header `Retry-After: 60`
-- **Vị trí**: FastAPI dependency `verify_rate_limit` trước route handler
+- Algorithm: Sliding window using a deque of timestamps
+- Standard library only: `threading`, `time`, `collections.deque`
+- Key: `org:{org_id}` or `ip:{ip}` when `org_id` is not provided
+- Limit: 100 requests per minute per key
+- Response: HTTP 429 with header `Retry-After: 60`
+- Location: FastAPI dependency `verify_rate_limit` applied before route handlers
 
 ## Dynamic Columns
 
-1. **Config** (`app/services/column_config.py`): Dict `org_id → [column1, column2, ...]`
-2. **Projection**: Trong `_project_employee()`, chỉ lấy các cột trong config, đúng thứ tự
-3. **Whitelist**: `ALLOWED_COLUMNS` – chỉ cho phép các field an toàn
-4. **Bảo mật**:
-   - Không bao giờ trả `org_id` trong response
-   - Không trả field ngoài config
-   - Mỗi org chỉ thấy data của chính mình (filter `org_id` ở DB layer)
+1. Config (`app/services/column_config.py`): a dict mapping `org_id` → `[column1, column2, ...]`
+2. Projection: In `_project_employee()`, only columns listed in the org's config are returned, in the configured order
+3. Whitelist: `ALLOWED_COLUMNS` — only safe fields are allowed
+4. Security:
+   - Never return `org_id` in responses
+   - Do not return fields outside the configured columns
+   - Each org only sees its own data (filter by `org_id` at the DB layer)
 
 ## Performance & Scalability
 
-### Giả định
-- Hàng triệu employee
-- Filter và pagination phải xử lý ở DB layer
+### Assumptions
 
-### Thiết kế hiện tại (in-memory)
-- **Org index**: `_index_by_org` – chỉ scan employees của org đang query
-- **Lazy filter**: Iterate + filter, không load toàn bộ vào memory
-- **Pagination**: Skip offset, take limit trong vòng lặp
+- Millions of employees
+- Filtering and pagination must be handled at the DB/storage layer
 
-### Hướng scale khi chuyển sang DB thật
-1. **PostgreSQL**: Thay `InMemoryEmployeeStore` bằng adapter gọi SQL
-2. **Index**: `(org_id, department)`, `(org_id, location)`, full-text trên `name`
-3. **Cursor pagination**: Có thể đổi từ offset sang cursor (keyset) cho dữ liệu lớn
-4. **Rate limit**: Chuyển sang Redis để share state giữa nhiều instance
-5. **Caching**: Cache kết quả search theo hash của params (TTL ngắn)
+### Current (in-memory) design
 
-## Cấu trúc thư mục
+- Org index: `_index_by_org` — only scans employees for the queried org
+- Lazy filtering: iterate and filter without loading everything into memory
+- Pagination: skip `offset`, take `limit` during iteration
+
+### Scaling to a real DB
+
+1. PostgreSQL: replace `InMemoryEmployeeStore` with a SQL adapter
+2. Indexes: `(org_id, department)`, `(org_id, location)`, and full-text search on `name`
+3. Cursor pagination: switch from offset to keyset (cursor) pagination for large datasets
+4. Rate limit: move to Redis to share rate limit state across instances
+5. Caching: cache search results keyed by a hash of the parameters (short TTL)
+
+## Project Structure
 
 ```
 hr_employee/
@@ -139,8 +145,8 @@ hr_employee/
 │   ├── api/v1/
 │   │   └── employees.py  # Search endpoint
 │   ├── models/           # Employee entity
-│   ├── schemas/          # Pydantic request/response
-│   ├── services/         # Search, column config
+│   ├── schemas/          # Pydantic request/response models
+│   ├── services/         # Search and column configuration
 │   ├── middleware/       # Rate limit logic
 │   └── db/               # In-memory store (replaceable)
 ├── tests/
@@ -148,7 +154,7 @@ hr_employee/
 ├── requirements.txt
 └── README.md
 ```
+
 ## OpenAPI
 
-FastAPI tự sinh OpenAPI tại `/docs` và `/redoc`. Schema có ví dụ request/response trong Pydantic `model_config`.
-
+FastAPI automatically generates OpenAPI documentation at `/docs` and `/redoc`. The Pydantic models include example request/response data in their `model_config`.
